@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Transplant the original NES sound engine into the C64 build.
+
+The engine ($F91E, called by every NMI) plays the three sound effect
+channels ($F9EB pulse 1 and triangle, $FAC4 pulse 2, $FBA1 noise) and the
+music ($FBFC: pulse 2, pulse 1 and triangle). It only writes APU
+registers, so it runs unchanged on the C64 with:
+
+* its zero page ($F0-$FF) and its $0700-$0712 moved to C64 RAM;
+* every APU register store going to snd_apu+$00..$0F. Stores that start
+  something on the NES ($4001/$4005 sweep reload; $4003, $4007, $400B and
+  $400F length, envelope and linear counter) also INC their snd_apu_w
+  byte; c64/src/sound.asm emulates the APU from these and drives the SID.
+  No instruction after these eight stores reads N or Z before setting
+  them again, except the BNE at $FA81 and $FCEC after $F974's RTS, which
+  sees Z = 0 from the INC as from the original ORA #$08;
+* $4017 (frame counter reset) and the $4011 DAC ramp left out: the
+  emulation clocks the frame sequencer itself, the DAC only shifts the
+  triangle and noise level slightly;
+* the ROM tables copied byte for byte, the song table's stream pointers
+  relocated.
+
+The output is c64/build/nes_sound.inc (code and tables) and
+nes_sound_symbols.inc (its zero page, included before any use).
+tools/test_sound.py runs the original engine and this copy side by side.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nes6502 import MODES_SIZE, OPCODES
+
+BASE = Path(__file__).resolve().parents[1]
+PRG = (BASE/'extracted/rom/prg_c000-ffff.bin').read_bytes()
+OUT = BASE/'c64/build/nes_sound.inc'
+SYMBOLS = BASE/'c64/build/nes_sound_symbols.inc'
+
+# Instruction ranges: [start, end). $F923-$F938 is $F91E after its $4017
+# write and before the DAC ramp.
+CODE = [(0xF923, 0xF939), (0xF953, 0xF993), (0xF9AB, 0xFA60), (0xFA64, 0xFB3B), (0xFB71, 0xFD22)]
+# ROM tables read by the code: [start, end). $FA60-1+Y reads up to $FA65
+# (the first two bytes of $FA64's code); $FF01+Y up to $FFF2.
+TABLES = [(0xF993, 0xF9AB), (0xFA60, 0xFA66), (0xFB3B, 0xFB71), (0xFD22, 0xFFFA)]
+# Song table entries (5 bytes from $FD2A): +1 is the stream pointer.
+SONG_POINTERS = [0xFD2B + 5*k for k in range(7)]
+
+ZERO_PAGE = {                       # NES zero page -> C64 zero page
+    0xF0: 0x06, 0xF1: 0x07, 0xF2: 0x08, 0xF3: 0x09, 0xF4: 0x0A, 0xF5: 0x0B,
+    0xF6: 0x0C, 0xF7: 0x0D, 0xF8: 0x0E, 0xF9: 0x0F, 0xFA: 0x10, 0xFB: 0x11,
+    0xFC: 0x12, 0xFD: 0x13, 0xFE: 0x15, 0xFF: 0x3E,
+}
+NAMES = {0xF0: 'snd_sfx3_on', 0xF1: 'snd_sfx2_on', 0xF2: 'snd_sfx1_on', 0xF3: 'snd_music_on',
+         0xFB: 'snd_music_req', 0xFC: 'snd_sfx1_req', 0xFE: 'snd_sfx2_req', 0xFF: 'snd_sfx3_req'}
+RAM_LO, RAM_HI = 0x0700, 0x0712     # -> snd_ram
+EVENTS = {1, 3, 5, 7, 0x0B, 0x0F}   # APU registers whose write starts something
+DROPPED = {0x4011, 0x4017}
+
+
+def in_ranges(address, ranges):
+    return any(lo <= address < hi for lo, hi in ranges)
+
+
+def table_ref(address):
+    for lo, hi in TABLES:
+        # tbl-1,Y style operands point one byte before a table
+        if lo-1 <= address < hi:
+            return f'snd_rom_{lo:04X}+({address-lo})'
+    return None
+
+
+def decode(lo, hi):
+    pc = lo
+    while pc < hi:
+        opcode = PRG[pc-0xC000]
+        mnemonic, mode = OPCODES[opcode]
+        size = MODES_SIZE[mode]
+        yield pc, mnemonic, mode, PRG[pc-0xC000+1:pc-0xC000+size]
+        pc += size
+    assert pc == hi, (hex(lo), hex(hi), hex(pc))
+
+
+def operand(pc, mnemonic, mode, raw):
+    """ca65 operand text, or a list of lines for APU stores."""
+    if mode in ('imp',):
+        return ''
+    if mode == 'acc':
+        return 'a'
+    if mode == 'imm':
+        return f'#${raw[0]:02X}'
+    if mode == 'rel':
+        target = (pc+2+((raw[0] ^ 0x80)-0x80)) & 0xFFFF
+        assert in_ranges(target, CODE), hex(pc)
+        return f'snd_{target:04X}'
+    if mode in ('zp', 'indy'):
+        address = raw[0]
+        assert address in ZERO_PAGE, (hex(pc), hex(address))
+        name = f'snd_zp_{address:02X}'
+        return name if mode == 'zp' else f'({name}),y'
+    address = raw[0] | raw[1] << 8
+    suffix = {'abs': '', 'absx': ',x', 'absy': ',y'}[mode]
+    if 0x4000 <= address <= 0x4017:
+        assert mnemonic in ('STA', 'STX', 'STY') and address not in DROPPED, hex(pc)
+        reg = address-0x4000
+        lines = [f'{mnemonic.lower()} snd_apu+${reg:02X}{suffix}']
+        if reg in EVENTS:
+            assert suffix in ('', ',x')
+            lines += [f'inc snd_apu_w+${reg:02X}{suffix}']
+        return lines
+    if RAM_LO <= address <= RAM_HI:
+        return f'snd_ram+${address-RAM_LO:02X}{suffix}'
+    if mnemonic in ('JSR', 'JMP'):
+        assert in_ranges(address, CODE), hex(pc)
+        return f'snd_{address:04X}'
+    ref = table_ref(address)
+    assert ref, (hex(pc), hex(address))
+    return ref+suffix
+
+
+def main():
+    symbols = ['; Generated by tools/transplant_sound.py. Do not edit.',
+               "; The NES sound engine's zero page ($F0-$FF) in C64 zero page."]
+    for nes, c64 in sorted(ZERO_PAGE.items()):
+        symbols.append(f'snd_zp_{nes:02X} = ${c64:02X}')
+        if nes in NAMES:
+            symbols.append(f'{NAMES[nes]} = ${c64:02X}')
+    SYMBOLS.write_text('\n'.join(symbols)+'\n')
+    lines = ['; Generated by tools/transplant_sound.py from the original PRG. Do not edit.',
+             '; The NES sound engine: $F91E (without $4017 and the DAC ramp) and its tables.']
+    stream = []                     # (pc, mnemonic, mode, operand text or lines)
+    for lo, hi in CODE:
+        for pc, mnemonic, mode, raw in decode(lo, hi):
+            stream.append((pc, mnemonic, mode, operand(pc, mnemonic, mode, raw)))
+        if hi == 0xF939:
+            stream.append((None, 'rts', 'imp', '                     ; ($F939: the DAC ramp is not emulated)'))
+    # Marked APU stores add three bytes, so some branches no longer reach:
+    # those become the long branches of branches.inc (inverted, over a JMP).
+    long = set()
+    while True:
+        offsets, at = {}, 0
+        for pc, mnemonic, mode, text in stream:
+            offsets[pc] = at
+            if isinstance(text, list):
+                at += MODES_SIZE[mode] + 3*(len(text) > 1)
+            else:
+                at += 5 if pc in long else (1 if pc is None else MODES_SIZE[mode])
+        grown = {pc for pc, mnemonic, mode, text in stream if mode == 'rel' and pc not in long
+                 and not -128 <= offsets[int(text[4:], 16)] - (offsets[pc]+2) <= 127}
+        if not grown:
+            break
+        long |= grown
+    # An effect channel with neither a request nor a sound playing only
+    # shifts zeros through its routine: the call is skipped (A, Y and the
+    # flags are loaded again by the next one).
+    guards = {0xF923: (0xFF, 0xF0), 0xF926: (0xFE, 0xF1), 0xF929: (0xFC, 0xF2)}
+    for pc, mnemonic, mode, text in stream:
+        if pc == 0xF923:
+            lines.append('sound_engine:')
+        if pc in guards:
+            request, playing = guards[pc]
+            lines += [f'snd_{pc:04X}:  lda snd_zp_{request:02X}', f'        ora snd_zp_{playing:02X}',
+                      '        beq :+', f'        {mnemonic.lower()} {text}', ':']
+            continue
+        if pc is None:
+            lines.append(f'        {mnemonic}{text}')
+        elif isinstance(text, list):
+            lines.append(f'snd_{pc:04X}:  {text[0]}')
+            lines += [f'        {t}' for t in text[1:]]
+        elif pc in long:
+            lines.append(f'snd_{pc:04X}:  j{mnemonic.lower()[1:]} {text}')
+        else:
+            lines.append(f'snd_{pc:04X}:  {mnemonic.lower()} {text}'.rstrip())
+    count = sum(pc is not None for pc, *_ in stream)
+    lines.append('')
+    for lo, hi in TABLES:
+        lines.append(f'snd_rom_{lo:04X}:')
+        pc = lo
+        while pc < hi:
+            if pc in SONG_POINTERS:
+                target = PRG[pc-0xC000] | PRG[pc-0xC000+1] << 8
+                ref = table_ref(target)
+                assert ref and 0xFD22 <= target < 0xFFFA, hex(target)
+                lines.append(f'        .word {ref}         ; ${pc:04X}: ${target:04X}')
+                pc += 2
+                continue
+            n = min(16, hi-pc, *[p-pc for p in SONG_POINTERS if p > pc] or [16])
+            lines.append('        .byte ' + ','.join(f'${b:02X}' for b in PRG[pc-0xC000:pc-0xC000+n]))
+            pc += n
+    OUT.write_text('\n'.join(lines)+'\n')
+    print(f'Sound engine: {count} instructions, {sum(h-l for l, h in TABLES)} table bytes -> {OUT.name}')
+
+
+if __name__ == '__main__':
+    main()

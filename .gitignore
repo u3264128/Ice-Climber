@@ -1,0 +1,47 @@
+# Generated assets and build output
+/c64-port/c64/build/
+/c64-port/build_dbg/
+/c64-port/extracted/
+/c64-port/converted/
+/c64-port/docs/verification/
+/c64-port/_refbuild/
+/dist/
+*.o
+*.obj
+*.lst
+*.map
+*.nes
+*.prg
+*.wav
+*.log
+
+# Local tools and machine settings
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+.env.*
+*.local.*
+.codex/
+.claude/
+.vscode/
+.idea/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editor and OS files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
