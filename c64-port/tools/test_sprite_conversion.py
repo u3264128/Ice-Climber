@@ -11,6 +11,30 @@ PLAYER_POSES = dict(WALK0=0, WALK1=1, WALK2=3, IDLE=0, STOP=5,
                     JUMP=6, HAMMER=7, ATTACK=9, STRIKE=10)
 
 
+def player_eyes(entry, compact=False):
+    """Dark eye pixels in the original left-facing NES OAM/CHR artwork."""
+    eyes = dict(WALK0=[(10,6),(10,7)], WALK1=[(10,6),(10,7)],
+                WALK2=[(9,7),(9,8)], IDLE=[(10,6),(10,7)],
+                STOP=[(11,7),(11,8)], JUMP=[(14,5),(13,6),(14,6)],
+                HAMMER=[(14,5)], ATTACK=[(7,5),(9,6),(9,7)], STRIKE=[(6,8),(6,9)])
+    # Compact faces keep skin above these eyes: the jump cheek, and in the
+    # others the face's outer edge, which shares the upper eye's MC pair.
+    compact_eyes = dict(JUMP=[(13,6),(14,6)], WALK1=[(10,7)], WALK2=[(9,8)], STRIKE=[(6,9)])
+    pose = entry['name'].split('_')[2]
+    points = compact_eyes.get(pose, eyes[pose]) if compact else eyes[pose]
+    return [(23-x if '_R_' in entry['name'] else x,y) for x,y in points]
+
+
+def check_jump_face(entry, drawn, compact):
+    """Keep a skin bridge above the compact jump eye, rather than a 2x2 hole."""
+    if not compact or entry['name'].split('_')[2] != 'JUMP':
+        return
+    for x in (13,14):
+        x = 23-x if '_R_' in entry['name'] else x
+        assert drawn[5][x] == 3, (entry['name'], 'missing jump cheek', x)
+        assert drawn[6][x] == 0, (entry['name'], 'missing jump eye', x)
+
+
 def decode(data, modes, offsets=None):
     """Decode layers in VIC priority order; values are NES colour roles."""
     result = [[0]*24 for _ in range(21)]
@@ -108,7 +132,7 @@ def minimum_errors(source, modes, offset):
                for _, _, pair, candidates in pixel_pairs(source, modes, offset))
 
 
-def check_pixels(source, drawn, modes, context, offset=0):
+def check_pixels(source, drawn, modes, context, offset=0, eyes=()):
     errors = 0
     multicolour = any(isinstance(mode, tuple) for mode in modes)
     for x, y, pair, candidates in pixel_pairs(source, modes, offset):
@@ -122,8 +146,17 @@ def check_pixels(source, drawn, modes, context, offset=0):
         assert actual in candidates, (context, 'incorrect layer mask', x, y, pair, actual)
         error = sum(a != b for a, b in zip(pair, actual))
         assert error == minimum, (context, 'avoidable pixel loss', x, y, pair, actual, minimum)
-        assert bool(any(pair)) == bool(any(actual)), (context, 'missing silhouette', x, y)
+        eye_pair = any((xx,y) in eyes for xx in (x,x+1)) and 0 in pair and 3 in pair
+        assert eye_pair or bool(any(pair)) == bool(any(actual)), (context, 'missing silhouette', x, y)
         errors += error
+    for x,y in eyes:
+        assert source[y][x] == drawn[y][x] == 0, (context, 'eye filled', x, y)
+        left = right = x
+        while left > 0 and not drawn[y][left-1]:
+            left -= 1
+        while right < 23 and not drawn[y][right+1]:
+            right += 1
+        assert 0 < left and right < 23 and right-left < 2, (context, 'eye open to the background', x, y)
     return errors
 
 
@@ -152,7 +185,10 @@ def main():
             shift = entry.get('detail_x_offset', 0) if len(modes) == 2 else 0
             drawn = decode(data, modes, (0, shift) if len(modes) == 2 else None)
             name = entry['name']+('_BONUS' if bonus else '')
-            errors = check_pixels(source, drawn, modes, name, shift)
+            eyes = player_eyes(base_entry, len(modes)==2) if name.startswith('POPO_') else ()
+            errors = check_pixels(source, drawn, modes, name, shift, eyes)
+            if name.startswith('POPO_'):
+                check_jump_face(base_entry, drawn, len(modes)==2)
             if name.startswith('POPO_') and len(modes) == 2:
                 player_grids.setdefault(entry['name'], []).append((shift, [minimum_errors(source, modes, p) for p in (0, 1)]))
             records.append(dict(frame=name, pixel_errors=errors, optimal_for_encoding=True, detail_x_offset=shift))

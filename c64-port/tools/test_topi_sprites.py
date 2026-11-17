@@ -17,7 +17,8 @@ from transplant_objects import map_ram
 from extract_screens import PPU
 
 TOPI_OVERLAY_PTR = 0xAC
-VIEW_DELTA = -4             # logical Y = original OAM Y + 18 - 4 after the view
+SPRITE_VIEW_SHIFT = 4       # logical Y = original OAM Y + 18 - 4 (fixed display origin)
+ARMED_VIEW_DELTA = -52      # climbers' delta on a pan's arming frame; objects ignore it
 
 
 def source_oam(slot, tile, x, y, facing, flip, phase=1):
@@ -125,14 +126,14 @@ def check_object_art(machine):
                     r[map_ram(nes)] = value
                 r[L['actor_mask']] = 255
                 r[L['logical_count']] = 0
-                r[L['view_delta']:L['view_delta']+2] = VIEW_DELTA.to_bytes(2, 'little', signed=True)
+                r[L['view_delta']:L['view_delta']+2] = ARMED_VIEW_DELTA.to_bytes(2, 'little', signed=True)
                 machine.x = obj
                 machine.call('actor_nes_object')
                 count = r[L['logical_count']]
                 assert count, ('object not drawn', obj, hex(tile))
                 facing = 1 if direction < 0x80 else 0
                 source = source_pixels(tiles, source_oam(slot, tile, x, y, facing, flag))
-                expected = {(sx+56, sy+18+VIEW_DELTA) for sx, sy in source}
+                expected = {(sx+56, sy+18-SPRITE_VIEW_SHIFT) for sx, sy in source}
                 drawn = c64_pixels(r, L, count)
                 multicolour = any(r[L['LOG_MC']+i] for i in range(count))   # compare double-wide pixels
                 if multicolour:

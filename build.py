@@ -17,6 +17,7 @@ sys.path.insert(0, str(TOOLS))
 from tool_paths import resolve_vice  # noqa: E402
 
 VICE_CHECKS = (
+    "verify_enemy_pan.py",
     "verify_stone_rules.py",
     "verify_title_stones.py",
     "verify_jump_topi.py", "verify_preview.py", "verify_mux_timing.py",

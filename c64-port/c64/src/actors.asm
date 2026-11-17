@@ -820,18 +820,14 @@ actor_nes_object:
         lda #0
         adc #0
         sta actor_xhi
-        ldy #0                  ; art with a two-row margin: Y+16, plus the
-        lda NES_OBJ_Y,X         ; view offset (actor_view_y)
+        ldy #0                  ; NES Y already follows each EC51 pan step.
+        lda NES_OBJ_Y,X         ; Apply only the fixed C64 display origin.
         clc
-        adc #16
+        adc #16-SPRITE_VIEW_SHIFT
+        sta actor_y
         bcc :+
         iny
-:       clc
-        adc view_delta
-        sta actor_y
-        tya
-        adc view_delta+1
-        sta actor_yhi
+:       sty actor_yhi
         lda NES_OBJ_ANIM,X
         sta tmp
         lda #1
@@ -979,20 +975,10 @@ actor_debris:
         ldx logical_count       ; free hardware sprites only
         cpx #8
         bcs @done
-        clc                     ; multicolour art without a margin: Y+18
-        adc #18                 ; and the view offset (actor_view_y)
-        sta tmp
-        lda #0
-        adc #0
-        sta work2
-        lda tmp
-        clc
-        adc view_delta
+        clc                     ; EC95 already moves debris with the screen.
+        adc #18-SPRITE_VIEW_SHIFT
         sta LOG_Y,X
-        lda work2
-        adc view_delta+1
-        bne @next
-        lda LOG_Y,X
+        bcs @next
         cmp #35
         bcc @next
         cmp #247

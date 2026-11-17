@@ -113,11 +113,28 @@ and bonus feet, in both directions. The parka stays at full horizontal
 resolution. Three hires layers reproduce every source pixel; two-layer
 poses combine white and skin details into multicolour pairs. Their pixel
 grid is selected to reduce errors without worsening either stage type.
+When a multicolour pair must choose between skin and a dark eye pixel,
+the compact poses preserve the eye opening. The eye can be two pixels wide;
+the total pixel error stays minimal, with no extra sprites or runtime work.
+The opening stays enclosed by the face: where that pair also holds the
+face's outer edge (compact WALK1, WALK2 and STRIKE), that row keeps its
+skin and the eye shows on the row below.
+The tilted compact jump pose keeps a one-row eye and skin immediately above
+it, avoiding a square hole during takeoff. Three-layer poses retain the exact
+NES pixels. The VICE player check also follows real jumps through both air
+poses in both directions, with one player, a crowded budget, and two players.
 The optimum applies to these modes and sprite allocation. A different
 memory layout or fewer simultaneous figures can provide more detail.
 The sprite bank uses all
 128 blocks. `verify_player_sprites.py` checks the displayed player pixels
 in VICE, including Nana, crowded scenes, and the 9-bit X carry.
+
+Enemy and debris Y positions already move with the NES pan routines. Their
+renderer applies only the fixed C64 screen offset, avoiding an extra 48-pixel
+jump when a pan is armed. `test_pan_sprites.py` covers all five pan boundaries,
+enemy classes and debris in both player modes. `verify_enemy_pan.py` checks
+displayed enemy pixels before, during and after scrolling, including the
+arming frame before the camera moves.
 
 ## Implementation notes
 

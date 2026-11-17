@@ -73,13 +73,46 @@ def multicolour(rows):
     return bytes(block)
 
 
-def player_accents(rows, shift):
+def player_accents(rows, shift, pose):
     """An odd detail grid preserves more pixels in selected player poses.
 
     The renderer moves this layer right by one pixel. A leading zero and
     the smaller margin put the original pixels back at their source X.
     """
-    return accents([[0]+row+[0] for row in rows], 2) if shift else accents(rows)
+    block = bytearray(accents([[0]+row+[0] for row in rows], 2) if shift else accents(rows))
+
+    def opaque(y, px):
+        """Composed sprite at detail pixel px: hires parka or an MC pair."""
+        x = px-4+shift
+        return 0 <= px < 24 and ((0 <= x < len(rows[y]) and rows[y][x] == 2)
+                                 or (block[y*3+px//8] >> (6-(px & 6))) & 3)
+
+    # Keep the original dark eyes between skin pixels. An MC pair cannot
+    # show skin beside transparency: choose the dark opening on this tie,
+    # losing one adjacent skin pixel instead of filling the eye.
+    for y, row in enumerate(rows[:10]):
+        # The tilted jump face already has a two-pixel eye on row 6.
+        # Clearing the single dark source pixel above it would erase an
+        # adjacent cheek pixel and turn that eye into a square hole.
+        if pose == 'JUMP' and y == 5:
+            continue
+        for x in range(1, len(row)-1):
+            if row[x] or row[x-1] != 3:
+                continue
+            end = x
+            while end < len(row) and row[end] == 0:
+                end += 1
+            if end < len(row) and row[end] == 3:
+                pairs = {(eye+4-shift) & ~1 for eye in range(x, end)}
+                kept = block[y*3:y*3+3]
+                for px in pairs:
+                    block[y*3+px//8] &= ~(3 << (6-(px & 6)))
+                # The face must still enclose the opening. When the lost
+                # skin pixel was the face's outer edge, the eye would
+                # become a notch: this row keeps skin, the other shows it.
+                if not (opaque(y, min(pairs)-1) and opaque(y, max(pairs)+2)):
+                    block[y*3:y*3+3] = kept
+    return bytes(block)
 
 
 def bonus_player_art(tiles, normal, metadata):
@@ -107,9 +140,9 @@ def bonus_player_art(tiles, normal, metadata):
         if "_R_" in name:
             rows = [row[::-1] for row in rows]
         if name.endswith("_DETAIL"):
-            layers = [player_accents(rows, entry['detail_x_offset'])]
+            layers = [player_accents(rows, entry['detail_x_offset'], name.split('_')[2])]
         elif entry["compact"]:
-            layers = [hires(rows, 2), player_accents(rows, entry['detail_x_offset'])]
+            layers = [hires(rows, 2), player_accents(rows, entry['detail_x_offset'], name.split('_')[2])]
         else:
             layers = [hires(rows, value) for value in (1, 2, 3)]
         start = (entry["pointer"]-0x40)*64
@@ -204,7 +237,7 @@ def main():
                 # The last attack pose is original NES $86. Two layers
                 # preserve parka colour for both climbers while fitting
                 # the complete attack sequence in the VIC sprite bank.
-                layers = [hires(rows2, 2), player_accents(rows2, pose in PLAYER_DETAIL_SHIFT)]
+                layers = [hires(rows2, 2), player_accents(rows2, pose in PLAYER_DETAIL_SHIFT, pose)]
             elif kind == "TOPI":
                 # Original Topi uses only palette values1/2. Keep the
                 # white eyes and dizzy stars one physical pixel wide.
@@ -297,7 +330,7 @@ def main():
             name = f'POPO_{direction}_{pose}_DETAIL'
             pointer = 0x40+len(blob)//64
             definitions.append(f'{name} = ${pointer:02X}')
-            blob += player_accents(pixels, pose in PLAYER_DETAIL_SHIFT)
+            blob += player_accents(pixels, pose in PLAYER_DETAIL_SHIFT, pose)
             meta.append(dict(name=name,pointer=pointer,layers=1,nes_base=base,
                              nes_height=height,nes_width=2,source_facing='L',multicolour=True,
                              detail_x_offset=int(pose in PLAYER_DETAIL_SHIFT)))

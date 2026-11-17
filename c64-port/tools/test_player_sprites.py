@@ -6,7 +6,7 @@ import itertools
 from nesgfx import chr_tiles
 from original_player_reference import PlayerReference
 from test_game import BASE, start
-from test_sprite_conversion import source_frame, decode, check_pixels
+from test_sprite_conversion import source_frame, decode, check_pixels, player_eyes, check_jump_face
 
 
 def body_pixels(reference,tiles):
@@ -181,7 +181,8 @@ def check_runtime_quality():
             drawn = decode(b''.join(blocks), modes, offsets)
             original = source_frame(tiles, entry, bonus)
             shift = offsets[1] if layers == 2 else 0
-            errors = check_pixels(original, drawn, modes, context, shift)
+            errors = check_pixels(original, drawn, modes, context, shift, player_eyes(entry, layers==2))
+            check_jump_face(entry, drawn, layers==2)
             if layers == 3:
                 assert errors == 0, context
                 exact += 1

@@ -5,11 +5,59 @@ import json
 
 from nesgfx import chr_tiles
 from test_player_sprites import player_fixture
-from test_sprite_conversion import PLAYER_POSES, source_frame, decode, check_pixels
+from test_sprite_conversion import PLAYER_POSES, source_frame, decode, check_pixels, player_eyes, check_jump_face
 from tool_paths import add_vice_argument
 from transplant_objects import map_ram
+from measure_display_scroll import DisplayTrace
 from verify_display_pixels import X0, grab
 from vice_session import BASE, ViceSession
+
+
+def jump_animation(vice, players, others, face):
+    """Follow real UP input across the two airborne poses in VICE's canvas."""
+    entries = {e['name']:e for e in json.loads((BASE/'c64/build/sprite_frames.json').read_text())}
+    facing = 'L' if face else 'R'
+    poses = [entries[f'POPO_{facing}_{p}'] for p in ('IDLE','JUMP','HAMMER')]
+    compact = players == 2 or others >= 5
+    with ViceSession(f'jump_face_{players}_{others}_{face}',vice) as s:
+        if players == 2: s.frame(0xFD); s.frame()
+        s.frame(0xEF); s.finish_preview()
+        for obj in range(11):
+            s.write(map_ram(0x3E8+obj),0)
+            s.write(map_ram(0x91+obj),0)
+        s.write(map_ram(0x48),bytes([255])*8)
+        for player in range(players):
+            address=s.labels['PLAYER_STATES']+player*32
+            block=bytearray(s.read(address,32))
+            block[3:9]=bytes((120+100*player,0,216,216,0,1))
+            block[10]=face
+            block[11:31]=bytes(20)
+            s.write(address,block)
+        s.sync_player_zero()
+        def budget(session,_): session.write('mux_others',others)
+        trace=DisplayTrace(s,budget,record_sprites=True)
+        previous=None; sequence=[]; checked=0
+        for frame in range(50):
+            current=trace.next(0xFE if frame in (1,2) else 255)
+            if previous is not None:
+                events=[v for v in previous['sprites'] if 120 <= v[0] <= 121]
+                if events:
+                    pointer=events[0][2]
+                    entry=next((e for e in poses if pointer == e['pointer']+int(compact and not e['compact'])),None)
+                    if entry and entry['name'].endswith(('JUMP','HAMMER')):
+                        pose=entry['name'].split('_')[2]
+                        if not sequence or sequence[-1] != pose: sequence.append(pose)
+                        if compact and pose == 'JUMP':
+                            canvas=grab(s); x,y=events[0][:2]
+                            for dx in (13,14):
+                                dx=dx if face else 23-dx
+                                assert canvas[y+5][x+X0+dx] == 10, ('jump cheek disappeared',players,others,face,frame)
+                                checked += 1
+            previous=current
+        assert sequence[:2] == ['JUMP','HAMMER'], ('jump transition not exercised',sequence)
+        assert checked > 0 or not compact
+        return dict(players=players,other_sprite_budget=others,face=face,frames=50,
+                    poses=sequence,cheek_pixels=checked)
 
 
 def check(vice):
@@ -70,9 +118,12 @@ def check(vice):
                             original = source_frame(tiles, entry, bonus)
                             shift = offsets[1] if layers == 2 else 0
                             context = (bonus, players, others, player, pose, face)
-                            check_pixels(original, drawn, modes, context, shift)
+                            check_pixels(original, drawn, modes, context, shift, player_eyes(entry, layers==2))
+                            check_jump_face(entry, drawn, layers==2)
                             palette = (0, 1, 14 if player == 0 else 4, 10)
                             y0 = logs[0x40+index]
+                            for dx,dy in player_eyes(entry, layers==2):
+                                assert canvas[y0+dy][x+X0+dx] == 0, ('displayed eye filled',context,dx,dy)
                             for y, row in enumerate(drawn):
                                 for dx, role in enumerate(row):
                                     if role:
@@ -87,7 +138,8 @@ def check(vice):
                         if players == 2 and pose in ('IDLE', 'HAMMER') and face == 0:
                             s.capture(BASE/f'docs/verification/{name}_{pose.lower()}.png')
             print(f'PASS displayed player poses: bonus={bonus}, players={players}, other-sprite budget={others}', flush=True)
-    return dict(status='passed', cases=cases, displayed_pixels=pixels,
+    animation=[jump_animation(vice,p,o,f) for p,o in ((1,0),(1,5),(2,0)) for f in (0,1)]
+    return dict(status='passed', cases=cases, displayed_pixels=pixels, jump_animation=animation,
                 exact_hires_cases=exact, compact_cases=compact,
                 both_players=True, both_directions=True, normal_and_bonus=True,
                 source='executed NES D17C and CE06 OAM')
